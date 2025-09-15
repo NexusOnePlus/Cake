@@ -8,5 +8,9 @@
     <UseWPF>true</UseWPF>
 	 <UseWindowsForms>true</UseWindowsForms>
 	  <OutputType>WinExe</OutputType>
-  </PropertyGroup>
+	  <ApplicationIcon>icon.ico</ApplicationIcon>  
+	 </PropertyGroup>
+	<ItemGroup>
+		<Resource Include="icon.ico" />
+	</ItemGroup>
 </Project>

@@ -1,7 +1,8 @@
 ﻿using System;
+using System.Drawing;
+using System.Reflection;
 using System.Windows;
 using System.Windows.Forms;
-using System.Drawing;
 
 namespace Cake;
 
@@ -15,9 +16,13 @@ public partial class App : System.Windows.Application
 
         KeyboardHook.Start();
 
+   
+
         _trayIcon = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = System.Drawing.Icon.ExtractAssociatedIcon(
+        System.Reflection.Assembly.GetExecutingAssembly().Location
+    ),
             Visible = true,
             Text = "Cake Switcher"
         };
