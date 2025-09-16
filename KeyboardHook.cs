@@ -17,10 +17,15 @@ class KeyboardHook
     private static bool selectorVisible = false;
     private static MainWindow? selector;
     private static int currentIndex = -1;
-
+    private static bool isFirstTabInSequence = true;
     public static void Start()
     {
         _hookID = SetHook(_proc);
+    }
+
+    public static void SetSelectorVisibility(bool isVisible)
+    {
+        selectorVisible = isVisible;
     }
 
     public static void Stop()
@@ -57,12 +62,13 @@ class KeyboardHook
 
             if (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN)
             {
-                Debug.WriteLine($"[KEYDOWN] vkCode={vkCode}");
+               // Debug.WriteLine($"[KEYDOWN] vkCode={vkCode}");
 
                 if (vkCode == VK_MENU || vkCode == VK_LMENU || vkCode == VK_RMENU)
                 {
                     altPressed = true;
-                    Debug.WriteLine("[STATE] ALT pressed");
+                    isFirstTabInSequence = true;
+                    //   Debug.WriteLine("[STATE] ALT pressed");
                 }
 
                 if (altPressed && vkCode == VK_TAB)
@@ -79,18 +85,16 @@ class KeyboardHook
 
                         if (!selectorVisible)
                         {
-                            selector.Show();
-                            selectorVisible = true;
-                            currentIndex = 0;
-                            Debug.WriteLine("[UI] Selector opened");
+                            currentIndex = 1;
+                            selector.PrepareAndShow(currentIndex);
+                            Debug.WriteLine($"[UI] Selector opened, index ready in {currentIndex}");
                         }
                         else
                         {
                             currentIndex = (currentIndex + 1) % selector.WindowsCount;
+                            selector.Highlight(currentIndex);
                             Debug.WriteLine($"[UI] Selector moved to index {currentIndex}");
                         }
-
-                        selector.Highlight(currentIndex);
                     });
 
 
@@ -99,23 +103,23 @@ class KeyboardHook
             }
             else if (wParam == (IntPtr)WM_KEYUP || wParam == (IntPtr)WM_SYSKEYUP)
             {
-                Debug.WriteLine($"[KEYUP] vkCode={vkCode}");
+            //    Debug.WriteLine($"[KEYUP] vkCode={vkCode}");
 
                 if (vkCode == VK_MENU || vkCode == VK_LMENU || vkCode == VK_RMENU)
                 {
                     altPressed = false;
                     Debug.WriteLine("[STATE] ALT released");
 
-                    if (selectorVisible)
+                    if (selectorVisible && selector != null)
                     {
                         System.Windows.Application.Current.Dispatcher.Invoke(() =>
                         {
-                            selector?.ActivateWindow(currentIndex);
-                            selector?.Hide();
-                            Debug.WriteLine("[UI] Selector closed, activated window");
+                            selector.ActivateWindow(currentIndex);
+                            selector.Hide();
+                            Debug.WriteLine("[UI] Selector closed, active window.");
                         });
-                        selectorVisible = false;
                     }
+                    isFirstTabInSequence = true;
                 }
             }
         }

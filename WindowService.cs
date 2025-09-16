@@ -13,9 +13,60 @@ namespace Cake;
 
 public class WindowService
 {
+    static WindowService()
+    {
+        NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_SYSTEM_FOREGROUND,
+            NativeMethods.EVENT_SYSTEM_FOREGROUND,
+            IntPtr.Zero,
+            _winEventProc,            0,
+            0,
+            NativeMethods.WINEVENT_OUTOFCONTEXT);
+
+        Debug.WriteLine("[HISTORY] WinEventHook windows history init.");
+    }
+
+    private static List<IntPtr> _windowHistory = new List<IntPtr>();
+    private static NativeMethods.WinEventDelegate _winEventProc = new NativeMethods.WinEventDelegate(WinEventProc);
+
+    private static void WinEventProc(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
+    {
+        if (eventType == NativeMethods.EVENT_SYSTEM_FOREGROUND && hwnd != IntPtr.Zero)
+        {
+            UpdateWindowHistory(hwnd);
+        }
+    }
+
+    public static void CleanupHistory()
+    {
+        int originalCount = _windowHistory.Count;
+        _windowHistory = _windowHistory.Where(hwnd => NativeMethods.IsWindow(hwnd)).ToList();
+        Debug.WriteLine($"[HISTORY] Cleaning completed. {originalCount - _windowHistory.Count} no valid windows deleted.");
+    }
+
+
+    private static void UpdateWindowHistory(IntPtr hwnd)
+    {
+        if (!IsAppWindow(hwnd)) return;
+
+        var title = GetWindowTitle(hwnd);
+        if (string.IsNullOrWhiteSpace(title)) return;
+
+        _windowHistory.Remove(hwnd);
+
+        _windowHistory.Insert(0, hwnd);
+
+        Debug.WriteLine($"[HISTORY] Active window: '{title}' (HWND: {hwnd}). History: {_windowHistory.Count} windows.");
+
+        if (_windowHistory.Count > 20)
+        {
+            _windowHistory.RemoveRange(20, _windowHistory.Count - 20);
+        }
+    }
+
     public List<WindowItem> EnumerateWindowsWithIcons()
     {
-        var list = new List<WindowItem>();
+        var allWindows = new List<WindowItem>();
         NativeMethods.EnumWindows((hWnd, lParam) =>
         {
             if (!IsAppWindow(hWnd)) return true;
@@ -35,12 +86,51 @@ public class WindowService
             }
 
             wi.Icon ??= GetSystemIcon(hWnd);
-            list.Add(wi);
+            allWindows.Add(wi);
 
             return true;
         }, IntPtr.Zero);
 
-        return list;
+        return OrderWindowsByHistory(allWindows);
+    }
+    public static IntPtr GetLastActiveWindow()
+    {
+        CleanupHistory();
+
+        if (_windowHistory.Count > 1)
+        {
+            Debug.WriteLine($"[HISTORY] Latest window active. Returning: {GetWindowTitle(_windowHistory[1])}");
+            return _windowHistory[1];
+        }
+
+        Debug.WriteLine("[HISTORY] Not found latest active window.");
+        return IntPtr.Zero;
+    }
+    private List<WindowItem> OrderWindowsByHistory(List<WindowItem> windows)
+    {
+        var orderedWindows = new List<WindowItem>();
+        var usedHandles = new HashSet<IntPtr>();
+        
+
+        foreach (var hwnd in _windowHistory)
+        {
+            var window = windows.FirstOrDefault(w => w.Hwnd == hwnd);
+            if (window != null && !usedHandles.Contains(hwnd))
+            {
+                if (NativeMethods.IsWindow(hwnd))
+                {
+                    orderedWindows.Add(window);
+                    usedHandles.Add(hwnd);
+                }
+            }
+        }
+
+        var remainingWindows = windows.Where(w => !usedHandles.Contains(w.Hwnd)).ToList();
+        orderedWindows.AddRange(remainingWindows);
+
+        Debug.WriteLine($"[ORDER] Completed. {orderedWindows.Count} total windows ({usedHandles.Count} by history, {remainingWindows.Count} remaining).");
+
+        return orderedWindows;
     }
 
     private (AppType, string?) GetIdentifierForWindow(IntPtr hWnd)
@@ -71,7 +161,7 @@ public class WindowService
         catch { return (AppType.Path, null); }
     }
 
-    private bool IsAppWindow(IntPtr hWnd)
+    public static bool IsAppWindow(IntPtr hWnd)
     {
 
         if (!NativeMethods.IsWindowVisible(hWnd)) return false;
@@ -101,7 +191,7 @@ public class WindowService
     }
 
 
-    private string GetWindowTitle(IntPtr hWnd)
+    private static string GetWindowTitle(IntPtr hWnd)
     {
         int len = NativeMethods.GetWindowTextLength(hWnd);
         if (len == 0) return string.Empty;

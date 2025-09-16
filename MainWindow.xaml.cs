@@ -17,9 +17,9 @@ using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
-using static Cake.NativeMethods;
 using Brushes = System.Windows.Media.Brushes;
 using Color = System.Windows.Media.Color;
+using Path = System.Windows.Shapes.Path;
 using Point = System.Windows.Point;
 namespace Cake;
 
@@ -41,22 +41,104 @@ public class WindowItem
 
   
    
-public partial class MainWindow : Window
+public partial class MainWindow : System.Windows.Window
 {
 
     private readonly WindowService _windowService = new();
     private List<WindowItem> _windows = new();
     private readonly List<UIElement> _groups = new();
+    private Path? _ringPath = null;
 
     private double _centerX, _centerY;
     private double _outerRadius = 170;
     private double _innerRadius = 60;
+    private bool _isVisible = false;
+
+    private bool _needsRefreshAndDraw = false;
+    private int _highlightIndexOnLoad = -1;
 
     public MainWindow()
     {
         InitializeComponent();
-        Loaded += MainWindow_Loaded;
-        SizeChanged += (_, __) => PositionCenterBorder();
+       // Loaded += MainWindow_Loaded;
+       // SizeChanged += (_, __) => PositionCenterBorder();
+
+        this.IsVisibleChanged += MainWindow_IsVisibleChanged;
+        this.SizeChanged += MainWindow_SizeChanged;
+    }
+
+    public void PrepareAndShow(int highlightIndex)
+    {
+        this._needsRefreshAndDraw = true;
+        this._highlightIndexOnLoad = highlightIndex;
+        this.Show();
+        this.Activate();
+    }
+
+
+    private void MainWindow_ContentRendered(object? sender, EventArgs e)
+    {
+        if (_needsRefreshAndDraw)
+        {
+            _needsRefreshAndDraw = false;
+
+            Debug.WriteLine("[WINDOW] ContentRendered: Drawing.");
+            PositionCenterBorder();
+            RefreshWindowsList();
+
+            if (_windows.Count <= 1)
+            {
+                Debug.WriteLine("[UI] No windows. Hiding selector.");
+                this.Hide();
+                return;
+            }
+
+            Highlight(_highlightIndexOnLoad);
+        }
+    }
+
+    private void MainWindow_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        bool isNowVisible = (bool)e.NewValue;
+        KeyboardHook.SetSelectorVisibility(isNowVisible);
+
+        if (isNowVisible)
+        {
+            if (this.ActualWidth > 0 && _needsRefreshAndDraw)
+            {
+                Debug.WriteLine("[WINDOW] IsVisibleChanged, Refreshing and Drawing.");
+                ExecuteRefreshAndDraw();
+            }
+        }
+    }
+
+    private void MainWindow_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (e.NewSize.Width == 0 || e.NewSize.Height == 0) return;
+
+        PositionCenterBorder();
+
+        if (_needsRefreshAndDraw)
+        {
+            Debug.WriteLine("[WINDOW] SizeChanged, Refreshing and Drawing.");
+            ExecuteRefreshAndDraw();
+        }
+    }
+
+    private void ExecuteRefreshAndDraw()
+    {
+        _needsRefreshAndDraw = false;
+
+        RefreshWindowsList();
+
+        if (_windows.Count <= 1)
+        {
+            Debug.WriteLine("[UI] No windows. Hiding.");
+            this.Hide();
+            return;
+        }
+
+        Highlight(_highlightIndexOnLoad);   
     }
 
     private void MainWindow_Loaded(object? sender, RoutedEventArgs e)
@@ -95,6 +177,42 @@ public partial class MainWindow : Window
 
     public int WindowsCount => _windows.Count;
 
+    public new void Show()
+    {
+        try
+        {
+            base.Show();
+            this.Activate();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[WINDOW] ERROR SHOW WINDOW: {ex.Message}");
+        }
+    }
+
+    public new void Hide()
+    {
+        try
+        {
+            base.Hide();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[WINDOW] ERROR HIDE WINDOW: {ex.Message}");
+        }
+    }
+
+
+    public void RefreshWindowsList()
+    {
+        Debug.WriteLine("[REFRESH] Reloading...");
+        _windows = _windowService.EnumerateWindowsWithIcons().Where(w => w.Icon != null).ToList();
+        if (_windows.Count == 0) _windows.Add(new WindowItem { Title = "No apps" });
+        Debug.WriteLine($"[REFRESH] Found {_windows.Count} windows.");
+        DrawPie(_windows);
+    }
+
+
     public void Highlight(int index)
     {
         if (index >= 0 && index < _windows.Count)
@@ -105,14 +223,17 @@ public partial class MainWindow : Window
                     w.Slice.Fill = Brushes.Transparent;
             }
 
-            CenterText.Text = _windows[index].Title;
+            var window = _windows[index];
+            CenterText.Text = window.Title;
 
-            if (_windows[index].Slice is Shape slice)
+            if (window.Slice is Shape slice)
             {
                 var grad = new RadialGradientBrush();
                 grad.GradientStops.Add(new GradientStop(Color.FromRgb(255, 255, 255), 0.5));
                 slice.Fill = grad;
             }
+
+            Debug.WriteLine($"[HIGHLIGHT] Focusing window: {window.Title}");
         }
     }
 
@@ -147,7 +268,6 @@ public partial class MainWindow : Window
     {
         _centerX = MainCanvas.ActualWidth / 2;
         _centerY = MainCanvas.ActualHeight / 2;
-
         Canvas.SetLeft(CenterBorder, _centerX - (CenterBorder.Width / 2));
         Canvas.SetTop(CenterBorder, _centerY - (CenterBorder.Height / 2));
     }
@@ -161,10 +281,16 @@ public partial class MainWindow : Window
         DrawPie(_windows);
     }
 
+
     private void DrawPie(List<WindowItem> items)
     {
         foreach (var g in _groups) MainCanvas.Children.Remove(g);
         _groups.Clear();
+        if (_ringPath != null)
+        {
+            MainCanvas.Children.Remove(_ringPath);
+            _ringPath = null;
+        }
 
         double cx = _centerX;
         double cy = _centerY;
@@ -176,23 +302,23 @@ public partial class MainWindow : Window
             var hole = new EllipseGeometry(new Point(cx, cy), inner, inner);
             var combined = new CombinedGeometry(GeometryCombineMode.Exclude, ring, hole);
 
-            
-   
-            var path = new System.Windows.Shapes.Path
+
+
+            _ringPath = new Path
             {
                 Data = combined,
                 Fill = Brushes.Black,
-            };
-            path.Effect = new DropShadowEffect
-            {
-                Color = Colors.Black,
-                BlurRadius = 20,
-                ShadowDepth = 0,
-                Opacity = 0.6
+                Effect = new DropShadowEffect
+                {
+                    Color = Colors.Black,
+                    BlurRadius = 20,
+                    ShadowDepth = 0,
+                    Opacity = 0.6
+                }
             };
 
 
-            MainCanvas.Children.Insert(0, path);
+            MainCanvas.Children.Insert(0, _ringPath);
         }
 
 
