@@ -1,26 +1,16 @@
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Diagnostics;
-using System.Drawing;
-using System.IO;
-using System.Linq;
-using System.Runtime.CompilerServices;
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Security.Policy;
-using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
-using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using Brushes = System.Windows.Media.Brushes;
-using Color = System.Windows.Media.Color;
 using Path = System.Windows.Shapes.Path;
 using Point = System.Windows.Point;
+using Size = System.Windows.Size;
 namespace Cake;
 
 
@@ -52,28 +42,76 @@ public partial class MainWindow : System.Windows.Window
     private double _centerX, _centerY;
     private double _outerRadius = 170;
     private double _innerRadius = 60;
-    private bool _isVisible = false;
 
     private bool _needsRefreshAndDraw = false;
     private int _highlightIndexOnLoad = -1;
 
+    private int _currentIndex = -1;
+
     public MainWindow()
     {
         InitializeComponent();
-       // Loaded += MainWindow_Loaded;
-       // SizeChanged += (_, __) => PositionCenterBorder();
+        // Loaded += MainWindow_Loaded;
+        // SizeChanged += (_, __) => PositionCenterBorder();
 
-        this.IsVisibleChanged += MainWindow_IsVisibleChanged;
-        this.SizeChanged += MainWindow_SizeChanged;
+       // this.IsVisibleChanged += MainWindow_IsVisibleChanged;
+       // this.SizeChanged += MainWindow_SizeChanged;
     }
 
-    public void PrepareAndShow(int highlightIndex)
+    /*public void PrepareAndShow(int highlightIndex)
     {
         this._needsRefreshAndDraw = true;
         this._highlightIndexOnLoad = highlightIndex;
         this.Show();
         this.Activate();
+    }*/
+
+    public void HandleAltTab(bool isFirstTime)
+    {
+        if (isFirstTime)
+        {
+            Debug.WriteLine("[UI] First Tab: Preparing, showing, and stealing focus...");
+
+            RefreshWindowsList();
+            if (_windows.Count <= 1)
+            {
+                Debug.WriteLine("[UI] Not enough windows to switch. Aborting.");
+                HandleAltRelease();
+                return;
+            }
+
+            this.Show();
+            this.UpdateLayout();
+            PositionCenterBorder();
+            DrawPie(_windows);
+            this.Activate();
+
+            _currentIndex = 1;
+            Highlight(_currentIndex);
+        }
+        else
+        {
+            Debug.WriteLine("[UI] Next Tab: Cycling...");
+            if (this.IsVisible && _windows.Count > 0)
+            {
+                _currentIndex = (_currentIndex + 1) % _windows.Count;
+                Highlight(_currentIndex);
+            }
+        }
     }
+
+    public void HandleAltRelease()
+    {
+        Debug.WriteLine("[UI] Alt Released: Activating selected window and hiding.");
+        if (this.IsVisible && _currentIndex != -1)
+        {
+            ActivateWindow(_currentIndex);
+        }
+
+        this.Hide();
+        _currentIndex = -1;
+    }
+
 
 
     private void MainWindow_ContentRendered(object? sender, EventArgs e)
@@ -100,7 +138,6 @@ public partial class MainWindow : System.Windows.Window
     private void MainWindow_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
         bool isNowVisible = (bool)e.NewValue;
-        KeyboardHook.SetSelectorVisibility(isNowVisible);
 
         if (isNowVisible)
         {
@@ -212,30 +249,30 @@ public partial class MainWindow : System.Windows.Window
         DrawPie(_windows);
     }
 
-
     public void Highlight(int index)
     {
         if (index >= 0 && index < _windows.Count)
         {
             foreach (var w in _windows)
             {
-                if (w.Slice != null)
-                    w.Slice.Fill = Brushes.Transparent;
+                if (w.Slice is Path path)
+                {
+                    path.Fill = Brushes.Transparent;
+                }
             }
 
             var window = _windows[index];
             CenterText.Text = window.Title;
-
-            if (window.Slice is Shape slice)
+            
+            if (window.Slice is Path slice)
             {
-                var grad = new RadialGradientBrush();
-                grad.GradientStops.Add(new GradientStop(Color.FromRgb(255, 255, 255), 0.5));
-                slice.Fill = grad;
+                slice.Fill = Brushes.White;
             }
 
             Debug.WriteLine($"[HIGHLIGHT] Focusing window: {window.Title}");
         }
     }
+
 
     public void ActivateWindow(int index)
     {
@@ -261,9 +298,6 @@ public partial class MainWindow : System.Windows.Window
 
         }
     }
-
-
-
     private void PositionCenterBorder()
     {
         _centerX = MainCanvas.ActualWidth / 2;
@@ -321,50 +355,58 @@ public partial class MainWindow : System.Windows.Window
             MainCanvas.Children.Insert(0, _ringPath);
         }
 
-
-
-
-
         int n = Math.Max(1, items.Count);
         double step = 360.0 / n;
         double start = -90;
-
+        double cornerRadius = 8.0;
         for (int i = 0; i < n; i++)
         {
             var item = items[i];
             double a1Deg = start + i * step;
             double a2Deg = start + (i + 1) * step;
-            double a1 = a1Deg * Math.PI / 180.0;
-            double a2 = a2Deg * Math.PI / 180.0;
 
-            var pOuter1 = new Point(cx + outer * Math.Cos(a1), cy + outer * Math.Sin(a1));
-            var pOuter2 = new Point(cx + outer * Math.Cos(a2), cy + outer * Math.Sin(a2));
-            var pInner2 = new System.Windows.Point(cx + inner * Math.Cos(a2), cy + inner * Math.Sin(a2));
-            var pInner1 = new Point(cx + inner * Math.Cos(a1), cy + inner * Math.Sin(a1));
+            double startAngleRad = a1Deg * Math.PI / 180.0;
+            double endAngleRad = a2Deg * Math.PI / 180.0;
+
+            cornerRadius = Math.Min(cornerRadius, (outer - inner) / 2);
+            if (cornerRadius <= 0) cornerRadius = 0.1;
+
+            double outerAngleShift = Math.Asin(cornerRadius / outer);
+            double innerAngleShift = Math.Asin(cornerRadius / inner);
+
+            Point pOuterStart = new Point(cx + outer * Math.Cos(startAngleRad + outerAngleShift), cy + outer * Math.Sin(startAngleRad + outerAngleShift));
+            Point pOuterEnd = new Point(cx + outer * Math.Cos(endAngleRad - outerAngleShift), cy + outer * Math.Sin(endAngleRad - outerAngleShift));
+            Point pInnerEnd = new Point(cx + inner * Math.Cos(endAngleRad - innerAngleShift), cy + inner * Math.Sin(endAngleRad - innerAngleShift));
+            Point pInnerStart = new Point(cx + inner * Math.Cos(startAngleRad + innerAngleShift), cy + inner * Math.Sin(startAngleRad + innerAngleShift));
+
+            Point pCornerOuterEnd = new Point(cx + (outer - cornerRadius) * Math.Cos(endAngleRad), cy + (outer - cornerRadius) * Math.Sin(endAngleRad));
+            Point pCornerInnerEnd = new Point(cx + (inner + cornerRadius) * Math.Cos(endAngleRad), cy + (inner + cornerRadius) * Math.Sin(endAngleRad));
+            Point pCornerInnerStart = new Point(cx + (inner + cornerRadius) * Math.Cos(startAngleRad), cy + (inner + cornerRadius) * Math.Sin(startAngleRad));
+            Point pCornerOuterStart = new Point(cx + (outer - cornerRadius) * Math.Cos(startAngleRad), cy + (outer - cornerRadius) * Math.Sin(startAngleRad));
+
             bool largeArc = (a2Deg - a1Deg) > 180.0;
+            var cornerSize = new Size(cornerRadius, cornerRadius);
 
-            var fig = new PathFigure { StartPoint = pOuter1, IsClosed = true };
-            fig.Segments.Add(new ArcSegment(pOuter2, new System.Windows.Size(outer, outer), 0, largeArc, SweepDirection.Clockwise, true));
-            fig.Segments.Add(new LineSegment(pInner2, true));
-            fig.Segments.Add(new ArcSegment(pInner1, new System.Windows.Size(inner, inner), 0, largeArc, SweepDirection.Counterclockwise, true));
+            var fig = new PathFigure { StartPoint = pOuterStart, IsClosed = true };
+
+            fig.Segments.Add(new ArcSegment(pOuterEnd, new Size(outer, outer), 0, largeArc, SweepDirection.Clockwise, true));
+            fig.Segments.Add(new ArcSegment(pCornerOuterEnd, cornerSize, 0, false, SweepDirection.Clockwise, true));
+            fig.Segments.Add(new LineSegment(pCornerInnerEnd, true));
+            fig.Segments.Add(new ArcSegment(pInnerEnd, cornerSize, 0, false, SweepDirection.Clockwise, true));
+
+            fig.Segments.Add(new ArcSegment(pInnerStart, new Size(inner, inner), 0, largeArc, SweepDirection.Counterclockwise, true));
+            fig.Segments.Add(new ArcSegment(pCornerInnerStart, cornerSize, 0, false, SweepDirection.Clockwise, true));
+            fig.Segments.Add(new LineSegment(pCornerOuterStart, true));
+            fig.Segments.Add(new ArcSegment(pOuterStart, cornerSize, 0, false, SweepDirection.Clockwise, true));
 
             var geom = new PathGeometry();
             geom.Figures.Add(fig);
 
-            /*var grad = new RadialGradientBrush();
-            grad.GradientStops.Add(new GradientStop(System.Windows.Media.Color.FromRgb(70, 130, 180), 0.0));
-            grad.GradientStops.Add(new GradientStop(System.Windows.Media.Color.FromRgb(30, 60, 120), 1.0));
-            */
-            var slice = new System.Windows.Shapes.Path
-            {
-                Data = geom,
-                Fill = Brushes.Transparent,
-            };
-
+            var slice = new Path { Data = geom, Fill = Brushes.Transparent, Tag = geom };
             item.Slice = slice;
 
 
-            double mid = (a1 + a2) / 2.0;
+            double mid = (startAngleRad + endAngleRad) / 2.0;
             double iconR = inner + (outer - inner) * 0.5;
             double iconX = cx + iconR * Math.Cos(mid);
             double iconY = cy + iconR * Math.Sin(mid);
@@ -406,14 +448,12 @@ public partial class MainWindow : System.Windows.Window
             int idx = i;
             group.MouseEnter += (_, __) =>
             {
-                var grad = new RadialGradientBrush();
-                grad.GradientStops.Add(new GradientStop(System.Windows.Media.Color.FromRgb(255, 255, 255), 0.5));
-                slice.Fill = grad;
+                slice.Fill = Brushes.White;
                 CenterText.Text = items[idx].Title;
             };
             group.MouseLeave += (_, __) =>
             {
-                slice.Fill = Brushes.Transparent;
+                    slice.Fill = Brushes.Transparent;
                 CenterText.Text = "Which";
             };
 
@@ -426,12 +466,15 @@ public partial class MainWindow : System.Windows.Window
             MainCanvas.Children.Add(group);
             _groups.Add(group);
 
-            var fade = new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(300))
+            /*var fade = new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(10))
             {
                 BeginTime = TimeSpan.FromMilliseconds(i * 90)
             };
             slice.BeginAnimation(OpacityProperty, fade);
-            (iconElement as FrameworkElement)?.BeginAnimation(OpacityProperty, fade);
+            (iconElement as FrameworkElement)?.BeginAnimation(OpacityProperty, fade);*/
+            slice.Opacity = 1.0;
+            if (iconElement is FrameworkElement fe)
+                fe.Opacity = 1.0;
         }
     }
 }

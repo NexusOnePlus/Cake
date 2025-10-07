@@ -8,10 +8,18 @@ namespace Cake;
 
 internal static class NativeMethods
 {
+    [DllImport("User32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool EnumDesktopWindows(IntPtr hDesktop, EnumWindowsProc lpEnumFunc, ref GCHandle lParam);
+    internal delegate bool EnumWindowsProc(IntPtr hWnd, ref GCHandle lParam);
+
     [DllImport("user32.dll")]
     public static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr hmodWinEventProc, WinEventDelegate lpfnWinEventProc, uint idProcess, uint idThread, uint dwFlags);
 
-
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool EnumChildWindows(IntPtr hwndParent, EnumWindowProc lpEnumFunc, IntPtr lParam);
+    internal delegate bool EnumWindowProc(IntPtr hWnd, IntPtr lParam);
 
 
     [DllImport("user32.dll")]
@@ -23,7 +31,6 @@ internal static class NativeMethods
 
     public delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
 
-    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     public const int GW_OWNER = 4;
     public const int WM_GETICON = 0x7F;
@@ -104,12 +111,22 @@ internal static class NativeMethods
     [Flags] public enum ProcessAccessFlags : uint { QueryLimitedInformation = 0x1000 }
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern IntPtr OpenProcess(ProcessAccessFlags access, bool inheritHandle, int processId);
+    public static extern SafeProcessHandle OpenProcess(ProcessAccessFlags access, bool inheritHandle, int processId);
+
+    public class SafeProcessHandle : Microsoft.Win32.SafeHandles.SafeHandleZeroOrMinusOneIsInvalid
+    {
+        private SafeProcessHandle() : base(true) { }
+
+        protected override bool ReleaseHandle()
+        {
+            return NativeMethods.CloseHandle(handle);
+        }
+    }
 
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool CloseHandle(IntPtr hObject);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern int GetApplicationUserModelId(IntPtr hProcess, ref int appUserModelIDLength, [Out] StringBuilder appUserModelID);
 
     [DllImport("user32.dll")]
@@ -118,17 +135,19 @@ internal static class NativeMethods
 
     [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr hObject);
 
-    [DllImport("shell32.dll")]
-    public static extern int SHCreateItemInKnownFolder([In] Guid kfid, uint dwKFFlags, string pszItem,
-        [In] Guid riid, [Out, MarshalAs(UnmanagedType.Interface)] out IShellItem2 ppv);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern int SHCreateItemInKnownFolder(
+        [MarshalAs(UnmanagedType.LPStruct)] Guid kfid,
+        uint dwFlags,
+        [MarshalAs(UnmanagedType.LPWStr)] string pszPath,
+        [In, MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        [Out, MarshalAs(UnmanagedType.Interface, IidParameterIndex = 4)] out IShellItem2 ppv
+    );
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
     public static extern int SHCreateItemFromParsingName([MarshalAs(UnmanagedType.LPWStr)] string path,
         IntPtr pbc, ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out object ppv);
 
-    [ComImport, Guid("000214E6-0000-0000-C000-000000000046"),
-     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    public interface IShellItem { }
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
@@ -137,21 +156,87 @@ internal static class NativeMethods
     public const int WS_EX_TOOLWINDOW = 0x00000080;
 
 
-    [ComImport, Guid("7E9FB0D3-919F-4307-AB2E-9B1860310C93"),
-         InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [ComImport]
+    [Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IShellItem
+    {
+        [PreserveSig]
+        int BindToHandler(IntPtr pbc, [MarshalAs(UnmanagedType.LPStruct)] Guid bhid, [MarshalAs(UnmanagedType.LPStruct)] Guid riid, out IntPtr ppv);
+
+        [PreserveSig]
+        int GetParent(out IShellItem ppsi);
+
+        [PreserveSig]
+        int GetDisplayName(SIGDN sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+
+        [PreserveSig]
+        int GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+
+        [PreserveSig]
+        int Compare(IShellItem psi, uint hint, out int piOrder);
+    }
+
+
+    public enum SIGDN : uint
+    {
+        NORMALDISPLAY = 0,
+        PARENTRELATIVEPARSING = 0x80018001,
+        DESKTOPABSOLUTEPARSING = 0x80028000,
+        PARENTRELATIVEEDITING = 0x80031001,
+        DESKTOPABSOLUTEEDITING = 0x8004c000,
+        FILESYSPATH = 0x80058000,
+        URL = 0x80068000,
+        PARENTRELATIVEFORADDRESSBAR = 0x8007c001,
+        PARENTRELATIVE = 0x80080001
+    }
+
+    [ComImport]
+    [Guid("7e9fb0d3-919f-4307-ab2e-9b1860310c93")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     public interface IShellItem2 : IShellItem
     {
-        [PreserveSig] int BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
-        [PreserveSig] int GetPropertyStore(int flags, ref Guid riid, out IntPtr ppv);
-        [PreserveSig] int GetPropertyStoreWithCreateObject(int flags, ref Guid riid, object punkCreateObject, out IntPtr ppv);
-        [PreserveSig] int GetPropertyStoreForKeys(IntPtr rgKeys, uint cKeys, int flags, ref Guid riid, out IntPtr ppv);
-        [PreserveSig] int GetPropertyDescriptionList(ref PROPERTYKEY keyType, ref Guid riid, out IntPtr ppv);
-        [PreserveSig] int Update(IntPtr pbc);
-        [PreserveSig] int GetProperty(ref PROPERTYKEY key, out PropVariant pv);
-        [PreserveSig] int GetCLSID(ref PROPERTYKEY key, out Guid clsid);
-        [PreserveSig] int GetFileTime(ref PROPERTYKEY key, out long filetime);
-        [PreserveSig] int GetInt32(ref PROPERTYKEY key, out int i);
-        [PreserveSig] int GetString(ref PROPERTYKEY key, [MarshalAs(UnmanagedType.LPWStr)] out string ppsz);
+        #region IShellItem overrides
+        [PreserveSig]
+        new int BindToHandler(IntPtr pbc, [MarshalAs(UnmanagedType.LPStruct)] Guid bhid, [MarshalAs(UnmanagedType.LPStruct)] Guid riid, out IntPtr ppv);
+        [PreserveSig]
+        new int GetParent(out IShellItem ppsi);
+        [PreserveSig]
+        new int GetDisplayName(SIGDN sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+        [PreserveSig]
+        new int GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+        [PreserveSig]
+        new int Compare(IShellItem psi, uint hint, out int piOrder);
+        #endregion
+
+        [PreserveSig]
+        int BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+        [PreserveSig]
+        int GetPropertyStore(int flags, ref Guid riid, out IntPtr ppv);
+        [PreserveSig]
+        int GetPropertyStoreWithCreateObject(int flags, [MarshalAs(UnmanagedType.IUnknown)] object punkCreateObject, ref Guid riid, out IntPtr ppv);
+        [PreserveSig]
+        int GetPropertyStoreForKeys(IntPtr rgKeys, uint cKeys, int flags, ref Guid riid, out IntPtr ppv);
+        [PreserveSig]
+        int GetPropertyDescriptionList(ref PROPERTYKEY keyType, ref Guid riid, out IntPtr ppv);
+        [PreserveSig]
+        int Update(IntPtr pbc);
+        [PreserveSig]
+        int GetProperty(ref PROPERTYKEY key, out PropVariant ppropvar);
+        [PreserveSig]
+        int GetCLSID(ref PROPERTYKEY key, out Guid pclsid);
+        [PreserveSig]
+        int GetFileTime(ref PROPERTYKEY key, out System.Runtime.InteropServices.ComTypes.FILETIME pft);
+        [PreserveSig]
+        int GetInt32(ref PROPERTYKEY key, out int pi);
+        [PreserveSig]
+        int GetString(ref PROPERTYKEY key, [MarshalAs(UnmanagedType.LPWStr)] out string ppsz);
+        [PreserveSig]
+        int GetUInt32(ref PROPERTYKEY key, out uint pui);
+        [PreserveSig]
+        int GetUInt64(ref PROPERTYKEY key, out ulong pull);
+        [PreserveSig]
+        int GetBool(ref PROPERTYKEY key, out bool pf);
     }
 
     [ComImport, Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b"),

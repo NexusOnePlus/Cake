@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
@@ -19,16 +20,17 @@ public class WindowService
             NativeMethods.EVENT_SYSTEM_FOREGROUND,
             NativeMethods.EVENT_SYSTEM_FOREGROUND,
             IntPtr.Zero,
-            _winEventProc,            0,
+            _winEventProc, 0,
             0,
             NativeMethods.WINEVENT_OUTOFCONTEXT);
 
-        Debug.WriteLine("[HISTORY] WinEventHook windows history init.");
+        Debug.WriteLine("[HISTORY] WinEventHook for window history initialized.");
     }
 
-    private static List<IntPtr> _windowHistory = new List<IntPtr>();
-    private static NativeMethods.WinEventDelegate _winEventProc = new NativeMethods.WinEventDelegate(WinEventProc);
-
+    private static readonly List<IntPtr> _windowHistory = new List<IntPtr>();
+    private static readonly NativeMethods.WinEventDelegate _winEventProc = new NativeMethods.WinEventDelegate(WinEventProc);
+    private static readonly Dictionary<string, ImageSource> _iconCache = new();
+    private static readonly Dictionary<IntPtr, (AppType Type, string Identifier)> _identifierCache = new();
     private static void WinEventProc(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
     {
         if (eventType == NativeMethods.EVENT_SYSTEM_FOREGROUND && hwnd != IntPtr.Zero)
@@ -40,20 +42,21 @@ public class WindowService
     public static void CleanupHistory()
     {
         int originalCount = _windowHistory.Count;
-        _windowHistory = _windowHistory.Where(hwnd => NativeMethods.IsWindow(hwnd)).ToList();
-        Debug.WriteLine($"[HISTORY] Cleaning completed. {originalCount - _windowHistory.Count} no valid windows deleted.");
+        _windowHistory.RemoveAll(hwnd => !NativeMethods.IsWindow(hwnd));
+        Debug.WriteLine($"[HISTORY] Cleanup completed. Removed {originalCount - _windowHistory.Count} invalid windows.");
     }
-
 
     private static void UpdateWindowHistory(IntPtr hwnd)
     {
+        _identifierCache.Remove(hwnd);
+
         if (!IsAppWindow(hwnd)) return;
 
+        GetAndCacheIdentifier(hwnd);
         var title = GetWindowTitle(hwnd);
         if (string.IsNullOrWhiteSpace(title)) return;
 
         _windowHistory.Remove(hwnd);
-
         _windowHistory.Insert(0, hwnd);
 
         Debug.WriteLine($"[HISTORY] Active window: '{title}' (HWND: {hwnd}). History: {_windowHistory.Count} windows.");
@@ -67,50 +70,117 @@ public class WindowService
     public List<WindowItem> EnumerateWindowsWithIcons()
     {
         var allWindows = new List<WindowItem>();
-        NativeMethods.EnumWindows((hWnd, lParam) =>
+        var handle = GCHandle.Alloc(allWindows);
+
+        try
         {
-            if (!IsAppWindow(hWnd)) return true;
-
-            string title = GetWindowTitle(hWnd);
-            if (string.IsNullOrWhiteSpace(title)) return true;
-
-            var wi = new WindowItem { Hwnd = hWnd, Title = title };
-
-            var (type, identifier) = GetIdentifierForWindow(hWnd);
-            if (!string.IsNullOrEmpty(identifier))
+            NativeMethods.EnumDesktopWindows(IntPtr.Zero, (IntPtr hWnd, ref GCHandle lParam) =>
             {
-                wi.Identifier = identifier;
-                wi.Icon = (type == AppType.Aumid)
-                    ? GetIconFromAumid(identifier, out _)
-                    : GetIconFromPath(identifier);
-            }
+                if (!IsAltTabWindow(hWnd)) return true;
+                
+                string title = GetWindowTitle(hWnd);
+                if (string.IsNullOrWhiteSpace(title)) return true;
 
-            wi.Icon ??= GetSystemIcon(hWnd);
-            allWindows.Add(wi);
+                Debug.WriteLine($"[ENUM] Window found: '{title}' (HWND: {hWnd})");
 
-            return true;
-        }, IntPtr.Zero);
+                var wi = new WindowItem { Hwnd = hWnd, Title = title };
+
+                var (type, identifier) = GetAndCacheIdentifier(hWnd);
+                if (!string.IsNullOrEmpty(identifier))
+                {
+                    wi.Identifier = identifier;
+                    if (_iconCache.TryGetValue(identifier, out var cachedIcon))
+                    {
+                        wi.Icon = cachedIcon;
+                    }
+                    else if (!NativeMethods.IsIconic(hWnd))
+                    {
+                        var newIcon = (type == AppType.Aumid)
+                            ? GetIconFromAumid(identifier, out _)
+                            : GetIconFromPath(identifier);
+                        if (newIcon != null)
+                        {
+                            wi.Icon = newIcon;
+                            _iconCache[identifier] = newIcon;
+                        }
+                    }
+                }
+
+                wi.Icon ??= GetSystemIcon(hWnd);
+                if (wi.Icon != null)
+                {
+                allWindows.Add(wi);
+                }
+                return true;
+            }, ref handle);
+        }
+        finally
+        {
+            if (handle.IsAllocated)
+                handle.Free();
+        }
 
         return OrderWindowsByHistory(allWindows);
+    
     }
+
+
+    private static bool IsAltTabWindow(IntPtr hWnd)
+    {
+        if (NativeMethods.GetWindowTextLength(hWnd) == 0) return false;
+
+        if (NativeMethods.GetWindow(hWnd, NativeMethods.GW_OWNER) != IntPtr.Zero) return false;
+
+        long exStyle = NativeMethods.GetWindowLong(hWnd, NativeMethods.GWL_EXSTYLE);
+        if ((exStyle & NativeMethods.WS_EX_TOOLWINDOW) != 0) return false;
+
+        int cloaked = 0;
+        NativeMethods.DwmGetWindowAttribute(hWnd, (int)NativeMethods.DWMWINDOWATTRIBUTE.DWMWA_CLOAKED, ref cloaked, Marshal.SizeOf<int>());
+        if (cloaked != 0) return false;
+
+        if (!NativeMethods.IsWindowVisible(hWnd) && !NativeMethods.IsIconic(hWnd))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static (AppType Type, string? Identifier) GetAndCacheIdentifier(IntPtr hWnd)
+    {
+        if (_identifierCache.TryGetValue(hWnd, out var cachedIdentifier))
+        {
+            return cachedIdentifier;
+        }
+
+        var (type, identifier) = FindIdentifierForWindow(hWnd);
+
+        if (!string.IsNullOrEmpty(identifier) && !identifier.EndsWith("ApplicationFrameHost.exe"))
+        {
+            _identifierCache[hWnd] = (type, identifier);
+            return (type, identifier);
+        }
+
+        return (type, identifier);
+    }
+
     public static IntPtr GetLastActiveWindow()
     {
         CleanupHistory();
 
         if (_windowHistory.Count > 1)
         {
-            Debug.WriteLine($"[HISTORY] Latest window active. Returning: {GetWindowTitle(_windowHistory[1])}");
+            Debug.WriteLine($"[HISTORY] Returning last active window: {GetWindowTitle(_windowHistory[1])}");
             return _windowHistory[1];
         }
 
-        Debug.WriteLine("[HISTORY] Not found latest active window.");
+        Debug.WriteLine("[HISTORY] No last active window found.");
         return IntPtr.Zero;
     }
     private List<WindowItem> OrderWindowsByHistory(List<WindowItem> windows)
     {
         var orderedWindows = new List<WindowItem>();
         var usedHandles = new HashSet<IntPtr>();
-        
 
         foreach (var hwnd in _windowHistory)
         {
@@ -128,68 +198,129 @@ public class WindowService
         var remainingWindows = windows.Where(w => !usedHandles.Contains(w.Hwnd)).ToList();
         orderedWindows.AddRange(remainingWindows);
 
-        Debug.WriteLine($"[ORDER] Completed. {orderedWindows.Count} total windows ({usedHandles.Count} by history, {remainingWindows.Count} remaining).");
+        Debug.WriteLine($"[ORDER] Ordering completed. {orderedWindows.Count} total windows ({usedHandles.Count} from history, {remainingWindows.Count} remaining).");
 
         return orderedWindows;
     }
 
-    private (AppType, string?) GetIdentifierForWindow(IntPtr hWnd)
+
+
+
+    private static (AppType Type, string? Identifier) FindIdentifierForWindow(IntPtr hWnd)
     {
+        Debug.WriteLine($"[GetIdentifier] Searching for identifier for HWND: {hWnd}");
+
         try
         {
-            NativeMethods.GetWindowThreadProcessId(hWnd, out uint pid);
-            if (pid == 0) return (AppType.Path, null);
-
-            using var proc = Process.GetProcessById((int)pid);
-            string? path = proc.MainModule?.FileName;
-
-            IntPtr handle = NativeMethods.OpenProcess(NativeMethods.ProcessAccessFlags.QueryLimitedInformation, false, (int)pid);
-            if (handle != IntPtr.Zero)
+            uint pid = GetRealProcessId(hWnd);
+            if (pid == 0)
             {
-                try
-                {
-                    int len = 1024;
-                    var sb = new StringBuilder(len);
-                    if (NativeMethods.GetApplicationUserModelId(handle, ref len, sb) == 0)
-                        return (AppType.Aumid, sb.ToString());
-                }
-                finally { NativeMethods.CloseHandle(handle); }
+                Debug.WriteLine($"[GetIdentifier] Could not get PID for HWND: {hWnd}.");
+                return (AppType.Path, null);
             }
 
-            return (AppType.Path, path);
+            using (var handle = NativeMethods.OpenProcess(NativeMethods.ProcessAccessFlags.QueryLimitedInformation, false, (int)pid))
+            {
+                if (handle.IsInvalid)
+                {
+                    Debug.WriteLine($"[GetIdentifier] OpenProcess failed for PID: {pid}. Attempting to get executable path.");
+                    return (AppType.Path, GetPathForDesktopApp(pid));
+                }
+
+                int len = 1024;
+                var sb = new StringBuilder(len);
+                if (NativeMethods.GetApplicationUserModelId(handle.DangerousGetHandle(), ref len, sb) == 0)
+                {
+                    var aumid = sb.ToString();
+                    Debug.WriteLine($"[GetIdentifier] Successfully obtained AUMID: '{aumid}' for PID: {pid}");
+                    return (AppType.Aumid, aumid);
+                }
+            }
         }
-        catch { return (AppType.Path, null); }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[GetIdentifier] Exception while getting AUMID: {ex.Message}. Will use executable path.");
+        }
+
+        uint finalPid = GetRealProcessId(hWnd);
+        return (AppType.Path, GetPathForDesktopApp(finalPid));
+    }
+
+    private static string? GetPathForDesktopApp(uint pid)
+    {
+        if (pid == 0) return null;
+        try
+        {
+            using var process = Process.GetProcessById((int)pid);
+            return process.MainModule?.FileName;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[GetPathForDesktopApp] Could not get path for PID {pid}: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static uint GetRealProcessId(IntPtr hWnd)
+    {
+        NativeMethods.GetWindowThreadProcessId(hWnd, out uint initialPid);
+        if (initialPid == 0) return 0;
+
+        try
+        {
+            using var initialProc = Process.GetProcessById((int)initialPid);
+            if (initialProc.ProcessName.Equals("ApplicationFrameHost", StringComparison.OrdinalIgnoreCase))
+            {
+                Debug.WriteLine($"[GetRealProcessId] HWND {hWnd} belongs to ApplicationFrameHost (PID: {initialPid}). Searching for child process...");
+                foreach (var childHwnd in GetChildWindows(hWnd))
+                {
+                    NativeMethods.GetWindowThreadProcessId(childHwnd, out uint childPid);
+                    if (childPid != 0 && childPid != initialPid)
+                    {
+                        Debug.WriteLine($"[GetRealProcessId] UWP child process found with PID: {childPid}");
+                        return childPid;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[GetRealProcessId] Exception while checking ApplicationFrameHost: {ex.Message}");
+        }
+
+        return initialPid;
+    }
+
+    private static List<IntPtr> GetChildWindows(IntPtr parent)
+    {
+        var result = new List<IntPtr>();
+        var listHandle = GCHandle.Alloc(result);
+        try
+        {
+            NativeMethods.EnumChildWindows(parent, (hWnd, lParam) =>
+            {
+                if (GCHandle.FromIntPtr(lParam).Target is List<IntPtr> list) list.Add(hWnd);
+                return true;
+            }, GCHandle.ToIntPtr(listHandle));
+        }
+        finally
+        {
+            if (listHandle.IsAllocated) listHandle.Free();
+        }
+        return result;
     }
 
     public static bool IsAppWindow(IntPtr hWnd)
     {
-
-        if (!NativeMethods.IsWindowVisible(hWnd)) return false;
         if (NativeMethods.GetWindow(hWnd, NativeMethods.GW_OWNER) != IntPtr.Zero) return false;
 
         long exStyle = NativeMethods.GetWindowLong(hWnd, NativeMethods.GWL_EXSTYLE);
         if ((exStyle & NativeMethods.WS_EX_TOOLWINDOW) != 0) return false;
 
-        int cloaked = 0;
-        NativeMethods.DwmGetWindowAttribute(
-            hWnd,
-            (int)NativeMethods.DWMWINDOWATTRIBUTE.DWMWA_CLOAKED,
-            ref cloaked,
-            Marshal.SizeOf<int>());
-
-        if (cloaked != 0) return false;
-
-        StringBuilder className = new(256);
-        NativeMethods.GetClassName(hWnd, className, className.Capacity);
-        if (className.ToString().Equals("ApplicationFrameHost", StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        string title = GetWindowTitle(hWnd);
-        if (string.IsNullOrWhiteSpace(title)) return false;
+        if (NativeMethods.GetWindowTextLength(hWnd) == 0) return false;
 
         return true;
     }
-
 
     private static string GetWindowTitle(IntPtr hWnd)
     {
@@ -200,16 +331,23 @@ public class WindowService
         return sb.ToString();
     }
 
-    private ImageSource? GetIconFromAumid(string aumid, out string? title)
+    private static ImageSource? GetIconFromAumid(string aumid, out string? title)
     {
         title = null;
+        Debug.WriteLine($"[GetIconFromAumid] Attempting to get icon for AUMID: {aumid}");
+
         NativeMethods.IShellItem2? shellItem = null;
         IntPtr hBitmap = IntPtr.Zero;
         try
         {
-            if (NativeMethods.SHCreateItemInKnownFolder(NativeMethods.AppsFolder, 0, aumid,
-                    typeof(NativeMethods.IShellItem2).GUID, out shellItem) != 0 || shellItem == null)
+            int hr = NativeMethods.SHCreateItemInKnownFolder(NativeMethods.AppsFolder, 0, aumid,
+                typeof(NativeMethods.IShellItem2).GUID, out shellItem);
+
+            if (hr != 0 || shellItem == null)
+            {
+                Debug.WriteLine($"[GetIconFromAumid] SHCreateItemInKnownFolder failed with HRESULT: {hr:X}");
                 return null;
+            }
 
             var pkey = NativeMethods.PKEY_ItemNameDisplay;
             if (shellItem.GetString(ref pkey, out string displayName) == 0)
@@ -217,13 +355,24 @@ public class WindowService
 
             var imageFactory = (NativeMethods.IShellItemImageFactory)shellItem;
             var size = new NativeMethods.SIZE { cx = 256, cy = 256 };
-            if (imageFactory.GetImage(size, NativeMethods.SIIGBF.ICONONLY, out hBitmap) == 0 && hBitmap != IntPtr.Zero)
+            hr = imageFactory.GetImage(size, NativeMethods.SIIGBF.ICONONLY, out hBitmap);
+
+            if (hr == 0 && hBitmap != IntPtr.Zero)
             {
+                Debug.WriteLine($"[GetIconFromAumid] Icon successfully obtained for AUMID: {aumid}");
                 var bmp = Imaging.CreateBitmapSourceFromHBitmap(hBitmap, IntPtr.Zero, Int32Rect.Empty,
                     BitmapSizeOptions.FromEmptyOptions());
                 bmp.Freeze();
                 return bmp;
             }
+            else
+            {
+                Debug.WriteLine($"[GetIconFromAumid] imageFactory.GetImage failed with HRESULT: {hr:X}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[GetIconFromAumid] Exception: {ex.Message}");
         }
         finally
         {
@@ -233,15 +382,18 @@ public class WindowService
         return null;
     }
 
-    private BitmapSource? GetIconFromPath(string path, int size = 256)
+    private  static BitmapSource? GetIconFromPath(string path, int size = 256)
     {
         if (string.IsNullOrEmpty(path) || !File.Exists(path)) return null;
+        Debug.WriteLine($"[GetIconFromPath] Attempting to get icon for path: {path}");
         IntPtr hBitmap = IntPtr.Zero;
+        object? shellItem = null;
         try
         {
             Guid iid = typeof(NativeMethods.IShellItem2).GUID;
-            NativeMethods.SHCreateItemFromParsingName(path, IntPtr.Zero, ref iid, out var shellItem);
-            if (shellItem is NativeMethods.IShellItemImageFactory factory)
+            int hr = NativeMethods.SHCreateItemFromParsingName(path, IntPtr.Zero, ref iid, out shellItem);
+
+            if (hr == 0 && shellItem is NativeMethods.IShellItemImageFactory factory)
             {
                 var sz = new NativeMethods.SIZE { cx = size, cy = size };
                 if (factory.GetImage(sz, NativeMethods.SIIGBF.ICONONLY, out hBitmap) == 0 && hBitmap != IntPtr.Zero)
@@ -253,24 +405,30 @@ public class WindowService
                 }
             }
         }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[GetIconFromPath] Exception: {ex.Message}");
+        }
         finally
         {
             if (hBitmap != IntPtr.Zero) NativeMethods.DeleteObject(hBitmap);
+            if (shellItem != null) Marshal.ReleaseComObject(shellItem);
         }
         return null;
     }
 
-    private BitmapSource? GetSystemIcon(IntPtr hWnd)
+    private static BitmapSource? GetSystemIcon(IntPtr hWnd)
     {
         IntPtr hIcon = NativeMethods.SendMessage(hWnd, NativeMethods.WM_GETICON, (IntPtr)NativeMethods.ICON_BIG, IntPtr.Zero);
         if (hIcon == IntPtr.Zero)
+        {
             hIcon = NativeMethods.SendMessage(hWnd, NativeMethods.WM_GETICON, (IntPtr)NativeMethods.ICON_SMALL2, IntPtr.Zero);
+        }
 
         if (hIcon != IntPtr.Zero)
         {
             var bmp = Imaging.CreateBitmapSourceFromHIcon(hIcon, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
             bmp.Freeze();
-            NativeMethods.DestroyIcon(hIcon);
             return bmp;
         }
         return null;
