@@ -13,4 +13,10 @@
 	<ItemGroup>
 		<Resource Include="icon.ico" />
 	</ItemGroup>
+	<ItemGroup>
+		<PackageReference Include="Velopack" Version="0.0.1298" />
+		<ApplicationDefinition Remove="App.xaml" />
+		<Page Include="App.xaml" />
+	</ItemGroup>
+
 </Project>
